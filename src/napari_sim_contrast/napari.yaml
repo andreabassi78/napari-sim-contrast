@@ -1,0 +1,20 @@
+name: napari-roi-registration
+display_name: Roi Registration
+contributions:
+  commands: 
+    - id: napari-roi-registration.make_background_widget
+      python_name: napari_roi_registration._widget:subtract_background
+      title: Make background widget
+    - id: napari-roi-registration.make_registration_widget
+      python_name: napari_roi_registration._widget:register_rois
+      title: Make registration widget
+    - id: napari-roi-registration.make_processing_widget
+      python_name: napari_roi_registration._widget:process_rois
+      title: Make processing widget   
+  widgets:
+    - command: napari-roi-registration.make_background_widget
+      display_name: Background Widget
+    - command: napari-roi-registration.make_registration_widget
+      display_name: Registration Widget
+    - command: napari-roi-registration.make_processing_widget
+      display_name: Processing Widget 
