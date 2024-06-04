@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 
 [tool.setuptools_scm]
-write_to = "src/napari_roi_registration/_version.py"
+write_to = "src/napari_sim_contrast/_version.py"
 
 [tool.black]
 line-length = 79
