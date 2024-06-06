@@ -18,6 +18,7 @@ from get_h5_data import get_h5_dataset, get_h5_attr, get_datasets_index_by_name,
 import os
 from qtpy.QtWidgets import  QWidget
 import pathlib
+from scipy import fftpack as fft
 
  
 @magic_factory(call_button="Contrast measurement")
@@ -121,16 +122,26 @@ def contrast_measurement(viewer: Viewer, image: Image, roi: Shapes,
     plt.show()
     
 
-class Filter_modes(Enum):
-    SAVGOL = 0
-    BUTTERWORTH = 1
+class Phase_estimation_modes(Enum):
+    PEAKS = 0
+    FOURIER = 1
+
+
+def find_max(img):
+    return divmod(np.argmax(img,),np.shape(img)[0])
+
+def find_nearest(array, value):
+    idx = (np.abs(array - value)).argmin()
+    return idx
 
 @magic_factory(call_button="Phase estimation")
 def phase_estimation(viewer: Viewer,
                     image: Image, roi: Shapes,
-                    filter_mode: Filter_modes,
+                    phase_estimation_modes: Phase_estimation_modes,
                     max_voltage:float = 12.0,
-                    num_phases:int=6):
+                    num_phases:int= 6,
+                    mask_size:float= 0.2,
+                    ):
     '''
     Parameters
     ----------
@@ -161,39 +172,56 @@ def phase_estimation(viewer: Viewer,
     plt.figure()
     plt.plot(slices[0,:])
 
-    for i in range(sz):
-        
-        this_slice = slices[i,:]
-        
-        if filter_mode == Filter_modes.SAVGOL:
-            baseline = sc.savgol_filter(this_slice,40,3)
+
+    if phase_estimation_modes == Phase_estimation_modes.PEAKS:
+
+        for i in range(sz):
+            
+            this_slice = slices[i,:]
+            
+            baseline = sc.savgol_filter(this_slice,sx//10,3)
             this_slice = baseline-this_slice
+
+            if i==1:
+                plt.figure()
+                plt.plot(this_slice)
+
+            max_pos.append(list(sc.argrelmax(this_slice,order=2)[0]))
+            if max_num == -1 or max_num > len(max_pos[i]):
+                max_num = len(max_pos[i])
+            period = np.average(np.diff(max_pos[i]))
+            rad_per_pixel = 2*np.pi/period
+
+        #compute dephasing
+        for i in range(sz-1):
+            dephasing.append(np.average(np.array(max_pos[i+1][0:max_num-1])-np.array(max_pos[0][0:max_num-1]))*rad_per_pixel)
+
+        dephasing = np.unwrap(dephasing)
+
+    elif phase_estimation_modes == Phase_estimation_modes.FOURIER:
+        print('Fourier')
+
+        phases = []
         
-        if filter_mode == Filter_modes.BUTTERWORTH:
-            F = sc.butter(4,25,'high',analog=False,output='sos',fs=200)
-            this_slice = sc.sosfilt(F,this_slice)
+        for im_idx, im in enumerate(sim_data):
+            ft = fft.fftshift(fft.fft2(im))
+            
+            # find the coordinates of the peak in Fourier space
+            if im_idx == 0:
+                mask_radius = sy*mask_size
+                x = np.array(np.linspace(-sx/2,sx/2,sx))
+                y = np.array(np.linspace(-sy/2,sy/2,sy))
+                XX,YY = np.meshgrid(x,y)
+                ft_filtered = ft * (XX**2+YY**2>mask_radius**2)
+                peak = find_max(np.abs(ft_filtered*(XX-YY>0)))
 
-        if i==1:
-            plt.figure()
-            plt.plot(this_slice)
-
-        max_pos.append(list(sc.argrelmax(this_slice,order=2)[0]))
-        if max_num == -1 or max_num > len(max_pos[i]):
-            max_num = len(max_pos[i])
-        period = np.average(np.diff(max_pos[i]))
-        rad_per_pixel = 2*np.pi/period
-
-    #compute dephasing
-    for i in range(sz-1):
-        dephasing.append(np.average(np.array(max_pos[i+1][0:max_num-1])-np.array(max_pos[0][0:max_num-1]))*rad_per_pixel)
-
-    dephasing = np.unwrap(dephasing)
-
-    y0 = np.arange(0,2*np.pi,2*np.pi/num_phases)
+            #phase = np.arctan(np.imag(ft[peak])/np.real(ft[peak]))
+            phase = np.angle(ft[peak])   
+            phases.append(phase)
+        dephasing = np.unwrap(np.array(phases))
+        dephasing = dephasing - dephasing[0]
     
-    def find_nearest(array, value):
-        idx = (np.abs(array - value)).argmin()
-        return idx
+    y0 = np.arange(0,2*np.pi,2*np.pi/num_phases)
 
     voltages_idx_to_use =[]
 
