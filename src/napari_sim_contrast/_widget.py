@@ -8,12 +8,16 @@ Napari widget for SIM images contrast estimation and phase calibration
 """
 
 import numpy as np
-from magicgui import magic_factory
+from magicgui import magic_factory, magicgui
 from napari import Viewer
 from napari.layers import Image, Shapes
 import matplotlib.pyplot as plt
 import scipy.signal as sc
 from enum import Enum
+from get_h5_data import get_h5_dataset, get_h5_attr, get_datasets_index_by_name, get_group_name
+import os
+from qtpy.QtWidgets import  QWidget
+import pathlib
 
  
 @magic_factory(call_button="Contrast measurement")
@@ -212,7 +216,74 @@ def phase_estimation(viewer: Viewer,
     plt.title('Voltage-dephasing characteristic')
     plt.show()    
 
+
+class H5opener(QWidget):
+
+    full_path = os.path.realpath(__file__)
+    _folder, _ = os.path.split(full_path) 
+    for level in range(3):
+        _folder = os.path.join(_folder, os.pardir)
     
+    def __init__(self, napari_viewer):
+        self.viewer = napari_viewer
+        super().__init__()
+        
+    def open_h5_dataset(self, path: pathlib.Path = _folder,
+                        dataset:int = 0, 
+                        ):
+        # open file
+        directory, filename = os.path.split(path)
+        stack,found = get_h5_dataset(path, dataset)
+        
+        #updates settings
+        measurement_names,_ = get_group_name(path, 'measurement')
+        measurement_name = measurement_names[0]
+        for key in ['magnification','n','NA','pixelsize','wavelength']:
+            val = get_h5_attr(path, key, group = measurement_name)
+            if len(val)>0 and hasattr(self,key):
+                new_value = val[0]
+                setattr(getattr(self,key), 'val', new_value)
+                print(f'Updated {key} to: {new_value} ')
+        fullname = f'dts{dataset}_{filename}'
+        self.show_image(stack, im_name=fullname)
+                 
+    def show_image(self, image_values, im_name, **kwargs):
+        '''
+        creates a new Image layer with image_values as data
+        or updates an existing layer, if 'hold' in kwargs is True 
+        '''
+        if 'scale' in kwargs.keys():    
+            scale = kwargs['scale']
+        else:
+            scale = [1.]*image_values.ndim
+        if 'colormap' in kwargs.keys():
+            colormap = kwargs['colormap']
+        else:
+            colormap = 'gray'    
+        if kwargs.get('hold') is True and im_name in self.viewer.layers:
+            layer = self.viewer.layers[im_name]
+            layer.data = image_values
+            layer.scale = scale
+        else:  
+            layer = self.viewer.add_image(image_values,
+                                            name = im_name,
+                                            scale = scale,
+                                            colormap = colormap)
+        self.center_stack(image_values)
+        if kwargs.get('autoscale') is True:
+            layer.reset_contrast_limits()
+        return layer
+
+    def center_stack(self, image_layer):
+        '''
+        centers a >3D stack in z,y,x 
+        '''
+        data = image_layer.data
+        if data.ndim >2:
+            current_step = list(self.viewer.dims.current_step)
+            for dim_idx in [-3,-2,-1]:
+                current_step[dim_idx] = data.shape[dim_idx]//2
+            self.viewer.dims.current_step = current_step    
 
 if __name__ == '__main__':
     
@@ -220,6 +291,13 @@ if __name__ == '__main__':
     viewer = napari.Viewer()
     contrast_widget = contrast_measurement()
     phase_widget = phase_estimation()
+
+    h5widget = H5opener(viewer) 
+
+    h5_opener = magicgui(h5widget.open_h5_dataset, call_button='Open h5 dataset')
+    viewer.window.add_dock_widget(h5_opener,
+                                  name = 'H5 file selection',
+                                  add_vertical_stretch = True)
     
     viewer.window.add_dock_widget(contrast_widget, name = 'Contrast calculation',
                                   area='right', add_vertical_stretch=True)
