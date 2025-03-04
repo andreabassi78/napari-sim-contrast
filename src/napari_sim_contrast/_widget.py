@@ -12,14 +12,16 @@ from magicgui import magic_factory, magicgui
 from napari import Viewer
 from napari.layers import Image, Shapes
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 import scipy.signal as sc
 from enum import Enum
-from get_h5_data import get_h5_dataset, get_h5_attr, get_datasets_index_by_name, get_group_name
+from src.napari_sim_contrast.get_h5_data import get_h5_dataset, get_h5_attr, get_datasets_index_by_name, get_group_name
 import os
 from qtpy.QtWidgets import  QWidget
 import pathlib
 from scipy import fftpack as fft
-
+from scipy.interpolate import interp1d
+from scipy.signal import savgol_filter
  
 @magic_factory(call_button="Contrast measurement")
 def contrast_measurement(viewer: Viewer, image: Image, roi: Shapes,
@@ -128,7 +130,7 @@ class Phase_estimation_modes(Enum):
 
 
 def find_max(img):
-    return divmod(np.argmax(img,),np.shape(img)[0])
+    return divmod(np.argmax(img), img.shape[1])
 
 def find_nearest(array, value):
     idx = (np.abs(array - value)).argmin()
@@ -137,10 +139,13 @@ def find_nearest(array, value):
 @magic_factory(call_button="Phase estimation")
 def phase_estimation(viewer: Viewer,
                     image: Image, roi: Shapes,
-                    phase_estimation_modes: Phase_estimation_modes,
+                    phase_estimation_modes: Phase_estimation_modes = Phase_estimation_modes.FOURIER,
                     max_voltage:float = 12.0,
                     num_phases:int= 6,
                     mask_size:float= 0.2,
+                    fitting_window = 30,
+                    get_numerical_dephasings: bool=False,
+                    show_figures:bool = False
                     ):
     '''
     Parameters
@@ -152,6 +157,10 @@ def phase_estimation(viewer: Viewer,
     filter_mode: filtering method for background removal
     max_voltage: maximum voltage in the acquired scan
     num_phases: number of phases to be recovered
+    fitting_window: window size used for the Savitzki-Golay
+    filter of the baseline
+    show_figures:flag used to determine whether to show
+    all figures or just the resulting dephasing
     '''    
     
     max_pos = []
@@ -169,8 +178,9 @@ def phase_estimation(viewer: Viewer,
     volts = np.linspace(0,max_voltage,sz)
     slices = np.mean(sim_data, axis=1)
 
-    plt.figure()
-    plt.plot(slices[0,:])
+    if show_figures:
+        plt.figure()
+        plt.plot(slices[0,:])
 
 
     if phase_estimation_modes == Phase_estimation_modes.PEAKS:
@@ -182,7 +192,7 @@ def phase_estimation(viewer: Viewer,
             baseline = sc.savgol_filter(this_slice,sx//10,3)
             this_slice = baseline-this_slice
 
-            if i==1:
+            if i==1 and show_figures:
                 plt.figure()
                 plt.plot(this_slice)
 
@@ -199,46 +209,83 @@ def phase_estimation(viewer: Viewer,
         dephasing = np.unwrap(dephasing)
 
     elif phase_estimation_modes == Phase_estimation_modes.FOURIER:
-        print('Fourier')
 
         phases = []
         
         for im_idx, im in enumerate(sim_data):
             ft = fft.fftshift(fft.fft2(im))
+
+            if show_figures and im_idx == 0:
+                plt.figure()
+                plt.imshow(np.log(np.abs(ft)))
             
             # find the coordinates of the peak in Fourier space
             if im_idx == 0:
-                mask_radius = sy*mask_size
+                mask_radius = sx*mask_size
                 x = np.array(np.linspace(-sx/2,sx/2,sx))
                 y = np.array(np.linspace(-sy/2,sy/2,sy))
                 XX,YY = np.meshgrid(x,y)
                 ft_filtered = ft * (XX**2+YY**2>mask_radius**2)
-                peak = find_max(np.abs(ft_filtered*(XX-YY>0)))
+                peak = find_max(np.abs(ft_filtered))
+
+                if show_figures:
+                    fig,ax = plt.subplots(1)
+                    ax.imshow(np.log(np.abs(ft)))
+                    eta_circ = Circle((sx/2,sy/2),mask_radius)
+                    eta_circ.set_facecolor("none")
+                    eta_circ.set_edgecolor("red")
+                    ax.add_patch(eta_circ)
+                    #print(peak)
+                    carrier_circ = Circle([peak[1],peak[0]],sx/50, facecolor="none", edgecolor='yellow')
+                    ax.add_patch(carrier_circ)
+                    
 
             #phase = np.arctan(np.imag(ft[peak])/np.real(ft[peak]))
             phase = np.angle(ft[peak])   
             phases.append(phase)
         dephasing = np.unwrap(np.array(phases))
         dephasing = dephasing - dephasing[0]
+        if dephasing[-1] < 0:
+            dephasing *= -1
     
     y0 = np.arange(0,2*np.pi,2*np.pi/num_phases)
+
+    if get_numerical_dephasings:
+        for i in range(len(dephasing)):
+            abs_deph = dephasing[i]
+            while abs_deph>2*np.pi:
+                abs_deph -= 2*np.pi
+            print('Image',str(i),'is phase shifted by',round(abs_deph/np.pi,3))
+
+
+
+
+
+    dephasing_fitted = savgol_filter(dephasing,fitting_window,3)
+
+    interp_func = interp1d(volts, dephasing_fitted, kind='linear')
+    interpN = 10
+    volts_interpolated = np.linspace(0,max_voltage,sz*interpN)
+    dephasing_interpolated = interp_func(volts_interpolated)
+    
 
     voltages_idx_to_use =[]
 
     for y in y0:
-        voltage_idx_to_use = find_nearest(dephasing,y)
+        voltage_idx_to_use = find_nearest(dephasing_interpolated,y)
         voltages_idx_to_use.append(voltage_idx_to_use)
 
-    print('Voltages to apply:', *np.round(volts[voltages_idx_to_use],1))
-    print('Phase (deg)      :', *np.round(dephasing[voltages_idx_to_use] * 180/np.pi,1))
-    print('Index            :', *voltages_idx_to_use)
+    print('Voltages to apply:', *np.round(volts_interpolated[voltages_idx_to_use],2))
+    print('Phase (deg)      :', *np.round(dephasing_interpolated[voltages_idx_to_use] * 180/np.pi,2))
+    print('Index            :', *map(lambda x : x//10,voltages_idx_to_use))
 
 
     plt.figure()
+    plt.plot(volts_interpolated,dephasing_interpolated)
     plt.plot(volts,dephasing)
     for y,idx in zip(y0,voltages_idx_to_use):
-        plt.hlines(y, min(volts),max(volts),'r',linestyles  ='dotted')
-        plt.vlines(volts[idx], min(dephasing),max(dephasing),'g',linestyles  ='dotted')
+        plt.hlines(y, min(volts_interpolated),max(volts_interpolated),'r',linestyles  ='dotted')
+        plt.vlines(volts_interpolated[idx], min(dephasing_interpolated),max(dephasing_interpolated),'g',linestyles  ='dotted')
     plt.xlabel('Applied voltage [V]')
     plt.ylabel('Dephasing [rad]')
     plt.title('Voltage-dephasing characteristic')
